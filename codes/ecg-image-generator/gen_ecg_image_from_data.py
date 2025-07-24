@@ -7,7 +7,7 @@ import numpy as np
 from scipy.stats import bernoulli
 from helper_functions import find_files
 from extract_leads import get_paper_ecg
-from HandwrittenText.generate import get_handwritten
+# from HandwrittenText.generate import get_handwritten
 from CreasesWrinkles.creases import get_creased
 from ImageAugmentation.augment import get_augment
 import warnings
