@@ -311,39 +311,148 @@ def convert_inches_to_seconds(inches):
     return float(inches*1.016)
 
 def write_wfdb_file(ecg_frame, filename, rate, header_file, write_dir, full_mode, mask_unplotted_samples):
-    full_header = load_header(header_file)
-    full_leads = get_leads(full_header)
-    full_leads = standardize_leads(full_leads)
-
-    lead_step = 10.0
-    samples = len(ecg_frame[full_mode])
-    array = np.zeros((1, samples))
-
-    leads = []
+    # Load original header info
     header_name, extn = os.path.splitext(header_file)
-    header = wfdb.rdheader(header_name)
+    try:
+        header = wfdb.rdheader(header_name)
+    except Exception as e:
+        raise ValueError(f"Error reading original header file '{header_name}': {e}")
 
-    for i, lead in enumerate(full_leads):
-        leads.append(lead)
-        if lead == full_mode:
-            lead = 'full' + lead
-        adc_gn = header.adc_gain[i]
+    # Get lead names: Original for output, Standardized for lookup
+    original_lead_names = header.sig_name
+    # Ensure standardize_leads is available (it should be in this file)
+    standardized_lead_names = standardize_leads(list(original_lead_names))
 
-        arr = ecg_frame[lead]
+    # --- MODIFICATION 1: Determine sample count (no changes needed here from last version) ---
+    if full_mode == 'None':
+        lead_keys = list(ecg_frame.keys())
+        if not lead_keys:
+            raise ValueError("Cannot determine sample count for WFDB header: ecg_frame dictionary is empty when full_mode is None.")
+        representative_lead_key = None
+        for key in lead_keys:
+            if not key.startswith('full'):
+                representative_lead_key = key
+                break
+        if representative_lead_key is None and lead_keys:
+             representative_lead_key = lead_keys[0]
+        if representative_lead_key is None:
+             raise ValueError("Cannot find a representative lead key in ecg_frame when full_mode is None.")
+        try:
+            samples = len(ecg_frame[representative_lead_key])
+        except TypeError:
+             raise TypeError(f"Could not determine length for lead '{representative_lead_key}' when full_mode is None.")
+        except KeyError:
+             raise KeyError(f"Representative key '{representative_lead_key}' selected but not found in ecg_frame when full_mode is None.")
+    else:
+        intended_key = 'full' + full_mode
+        if intended_key not in ecg_frame:
+             if full_mode in ecg_frame:
+                intended_key = full_mode
+                print(f"Warning: Key '{'full' + full_mode}' not found for full_mode lead. Using base key '{full_mode}' for sample count.", file=sys.stderr)
+             else:
+                raise KeyError(f"Neither '{intended_key}' nor '{full_mode}' found as a key in the ecg_frame dictionary prepared for WFDB writing when full_mode='{full_mode}'.")
+        try:
+            samples = len(ecg_frame[intended_key])
+        except TypeError:
+            raise TypeError(f"Could not determine length for lead '{intended_key}' (full_mode='{full_mode}').")
+        except KeyError:
+             raise KeyError(f"Key '{intended_key}' not found in ecg_frame when trying to determine sample count for full_mode='{full_mode}'.")
+    # --- END MODIFICATION 1 ---
+
+    # Prepare the data array
+    array = np.zeros((1, samples))
+    output_sig_names = [] # Store the ORIGINAL lead names for output
+
+    # --- MODIFICATION 2: Loop using indices and handle keys correctly ---
+    for i in range(len(original_lead_names)):
+        # Get both original and standardized names for the current index
+        lead_name_original = original_lead_names[i]
+        lead_name_standardized = standardized_lead_names[i]
+
+        output_sig_names.append(lead_name_original) # Use ORIGINAL name for output sig_name list
+
+        # Determine the correct key to access data from ecg_frame dictionary
+        # Use the STANDARDIZED name for logic involving dictionary keys
+        current_lead_key = lead_name_standardized # Default to the standardized name
+        if full_mode != 'None' and lead_name_standardized == full_mode:
+            # If this IS the designated long lead (using standardized name for check)
+            # try accessing 'full' + STANDARDIZED name first
+            full_key_candidate = 'full' + lead_name_standardized
+            if full_key_candidate in ecg_frame:
+                current_lead_key = full_key_candidate
+            # else: keep current_lead_key as the base standardized name
+
+        # Check if the determined key exists before trying to access it
+        if current_lead_key not in ecg_frame:
+             available_keys = list(ecg_frame.keys())
+             raise KeyError(f"Attempting to access key '{current_lead_key}' (derived from standardized lead '{lead_name_standardized}') for original lead '{lead_name_original}' but key is not in ecg_frame. full_mode='{full_mode}'. Available keys: {available_keys}")
+
+        # Get gain for this lead from the original header using index 'i'
+        try:
+            adc_gn = header.adc_gain[i]
+            if adc_gn == 0:
+                 print(f"Warning: ADC gain for lead '{lead_name_original}' is 0. Using default gain of 200.", file=sys.stderr)
+                 adc_gn = 200
+        except IndexError:
+             raise IndexError(f"Could not get ADC gain for lead index {i} ('{lead_name_original}'). Header might be inconsistent.")
+
+        # Access data using the determined key (which is based on standardized name)
+        arr = ecg_frame[current_lead_key]
         arr = np.array(arr)
-        arr[np.isnan(arr)] = BIT_NAN_16/adc_gn
+
+        # Handle NaN values
+        nan_mask = np.isnan(arr)
+        arr[nan_mask] = BIT_NAN_16 / adc_gn
+
+        # Reshape for concatenation
         arr = arr.reshape((1, arr.shape[0]))
-        array = np.concatenate((array, arr),axis = 0)
-    
-    head, tail  = os.path.split(filename)
-    
+
+        # Ensure array length matches calculated samples
+        if arr.shape[1] != samples:
+            raise ValueError(f"Length mismatch for lead '{lead_name_original}' (key: '{current_lead_key}'). Expected {samples}, got {arr.shape[1]}. Check data segmentation logic.")
+
+        # Concatenate the processed lead data
+        array = np.concatenate((array, arr), axis=0)
+    # --- END MODIFICATION 2 ---
+
+    # Remove the initial dummy row
     array = array[1:]
-    wfdb.wrsamp(record_name = tail, 
-                fs = rate, units = header.units,
-                sig_name = leads, p_signal = array.T, fmt = header.fmt,
-                adc_gain = header.adc_gain, baseline = header.baseline, 
-                base_time = header.base_time, base_date = header.base_date, 
-                write_dir = write_dir, comments = header.comments)
+
+    # Final checks
+    if array.shape[0] != len(output_sig_names):
+        raise ValueError(f"Mismatch between number of data rows ({array.shape[0]}) and number of signal names ({len(output_sig_names)}).")
+    if array.shape[1] != samples:
+         raise ValueError(f"Final WFDB data array has {array.shape[1]} samples, but header expects {samples}.")
+
+    # Get the base name for the output file
+    head, tail = os.path.split(filename)
+    # Ensure filename used here is the base name intended for the output record
+    # Assuming 'filename' passed to write_wfdb_file is like '/path/to/input/00001_lr'
+    # or potentially '/path/to/input/00001_lr-0' if processing segments
+    # Let's refine how output_record_name is determined based on context
+    # From extract_leads.py: `name, ext = os.path.splitext(full_header_file)`
+    # `write_wfdb_file(segmented_ecg_data, name, ...)` -> so filename is base name without ext
+    # From gen_ecg_image_from_data.py: passes `filename` which is input file path.
+    # This seems inconsistent. Let's assume filename passed IS the base record name desired.
+    output_record_name = os.path.basename(filename) # Safest approach: take only the file part
+
+    # Write the new WFDB file
+    try:
+        wfdb.wrsamp(record_name=output_record_name,
+                    fs=rate,
+                    units=header.units,
+                    sig_name=output_sig_names, # Use the ORIGINAL lead names
+                    p_signal=array.T,
+                    fmt=header.fmt,
+                    adc_gain=header.adc_gain,
+                    baseline=header.baseline,
+                    base_time=header.base_time,
+                    base_date=header.base_date,
+                    write_dir=write_dir,
+                    comments=header.comments)
+    except Exception as e:
+        # Provide more info on failure
+        raise IOError(f"Error writing WFDB file '{os.path.join(write_dir, output_record_name)}' with signals {output_sig_names} and shape {array.T.shape}: {e}")
 
 def get_lead_pixel_coordinate(leads):
 
