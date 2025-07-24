@@ -16,7 +16,7 @@ from random import randint
 import random
 
 # Run script.
-def get_paper_ecg(input_file,header_file,output_directory, seed, add_dc_pulse,add_bw,show_grid, add_print, configs, mask_unplotted_samples = False, start_index = -1, store_configs=False, store_text_bbox=True,key='val',resolution=100,units='inches',papersize='',add_lead_names=True,pad_inches=1,template_file=os.path.join('TemplateFiles','TextFile1.txt'),font_type=os.path.join('Fonts','Times_New_Roman.ttf'),standard_colours=5,full_mode='II',bbox = False,columns=-1):
+def get_paper_ecg(input_file,header_file,output_directory, seed, add_dc_pulse,add_bw,show_grid, add_print, configs, mask_unplotted_samples = False, start_index = -1, store_configs=False, store_text_bbox=True,key='val',resolution=100,units='inches',papersize='',add_lead_names=True,pad_inches=1,template_file=os.path.join('TemplateFiles','TextFile1.txt'),font_type=os.path.join('Fonts','Times_New_Roman.ttf'),standard_colours=5,full_mode='II',bbox = False,columns=-1, shuffle_leads=False):
 
     # Extract a reduced-lead set from each pair of full-lead header and recording files.
     full_header_file = header_file
@@ -54,16 +54,37 @@ def get_paper_ecg(input_file,header_file,output_directory, seed, add_dc_pulse,ad
             
     elif(len(full_leads)==12):
         gen_m = 12
-        if full_mode not in full_leads:
+        # MODIFICATION START: Check for 'None' *before* checking if it's a valid lead
+        if full_mode != 'None' and full_mode not in full_leads:
+            # Only overwrite if the user provided something other than 'None'
+            # AND that provided value isn't a valid lead name.
+            print(f"Warning: full_mode '{full_mode}' not found in leads or 'None'. Defaulting to first lead: {full_leads[0]}", file=sys.stderr)
             full_mode = full_leads[0]
-        else:
-            full_mode = full_mode
+        # If full_mode was 'None', it remains 'None'.
+        # If full_mode was a valid lead, it remains that lead.
+        # MODIFICATION END
         if(columns==-1):
             columns = 4
     else:
         gen_m = len(full_leads)
         columns = 4
         full_mode = 'None'
+
+    if shuffle_leads:
+        # Create a list of leads that will be plotted in the main grid
+        # by excluding the special 'full_mode' rhythm strip lead.
+        leads_for_grid = [lead for lead in full_leads if lead != full_mode]
+
+        # Shuffle the list of grid leads randomly.
+        random.shuffle(leads_for_grid)
+
+        # Reconstruct the full_leads list. If a full_mode lead exists,
+        # it will be appended at the end, preserving its special role.
+        # The main grid leads will now be in a new random order.
+        if full_mode != 'None' and full_mode in full_leads:
+            full_leads = leads_for_grid + [full_mode]
+        else:
+            full_leads = leads_for_grid
 
     template_name = 'custom_template.png'
 
